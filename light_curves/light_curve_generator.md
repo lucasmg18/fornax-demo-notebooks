@@ -17,13 +17,14 @@ kernelspec:
 ## Learning Goals    
 By the end of this tutorial, you will be able to:  
   &bull; Automatically load a catalog of sources  
-  &bull; Automatically & efficiently search NASA and non-NASA resources for light curves at scale  
   &bull; Store & manipulate light curves in a Pandas MultiIndex dataframe  
   &bull; Plot all light curves on the same plot
  
  
 ## Introduction:  
  &bull; A user has a sample of interesting targets for which they would like to see a plot of available archival light curves.  We start with a small set of changing look AGN from Yang et al., 2018, which are automatically downloaded. Changing look AGN are cases where the broad emission lines appear or disappear (and not just that the flux is variable). 
+ 
+ &bull; The light curve collection code demonstrated here is parallelized and run at scale (i.e., for large sample sizes) in the neighboring notebook: scale_up.
  
  &bull; We model light curve plots after van Velzen et al. 2021.  We search through a curated list of time-domain NASA holdings as well as non-NASA sources.  HEASARC catalogs used are Fermi and Beppo-Sax, IRSA catalogs used are ZTF and WISE, and MAST catalogs used are Pan-STARRS, TESS, Kepler, and K2.  Non-NASA sources are Gaia and IceCube. This list is generalized enough to include many types of targets to make this notebook interesting for many types of science.  All of these time-domain archives are searched in an automated and efficient fashion using astroquery, pyvo, pyarrow or APIs.
  
@@ -46,7 +47,6 @@ By the end of this tutorial, you will be able to:
  &bull; `hpgeom` to locate coordinates in HEALPix space  
  &bull; `lightkurve` to search TESS, Kepler, and K2 archives  
  &bull; `matplotlib` for plotting  
- &bull; `multiprocessing` to use the power of multiple CPUs to get work done faster  
  &bull; `numpy` for numerical processing  
  &bull; `pandas` for their data structure DataFrame and all the accompanying functions  
  &bull; `pyarrow` to work with Parquet files for WISE and ZTF  
@@ -69,7 +69,6 @@ MAST, HEASARC, & IRSA Fornax teams
 ```
 
 ```{code-cell} ipython3
-import multiprocessing as mp
 import sys
 import time
 
@@ -182,7 +181,8 @@ The function to retrieve HEASARC data accesses the HEASARC archive using a pyvo 
 While these aren't strictly light curves, we would like to track if there are gamma rays detected in advance of any change in the CLAGN light curves. We store these gamma ray detections as single data points.  Because gamma ray detections typically have very large error radii, our current technique is to keep matches in the catalogs within some manually selected error radius, currently defaulting to 1 degree for Fermi and 3 degrees for Beppo SAX.  These values are chosen based on a histogram of all values for those catalogs.
 
 ```{code-cell} ipython3
-start_serial = time.time()  #keep track of all serial archive calls to compare later with parallel archive call time
+# keep track of runtime for all serial archive calls to compare with parallel call in scale_up notebook
+start_serial = time.time()
 heasarcstarttime = time.time()
 
 # What is the size of error_radius for the catalogs that we will accept for our cross-matching?
@@ -334,80 +334,26 @@ end_serial = time.time()
 print('total time for serial archive calls is ', end_serial - start_serial, 's')
 ```
 
-## 4. Parallel processing the archive calls
-
-```{code-cell} ipython3
-# number of workers to use in the parallel processing pool
-# this should equal the total number of archives called
-n_workers = 8
-```
-
-```{code-cell} ipython3
-# we'll use the default keyword arguments for all archives except ZTF
-# we must turn off the ZTF internal parallelization because it is incompatible with the pool launched below
-ztf_kwargs = {"nworkers": None}
-
-# note that the ZTF call is relatively slow compared to other archives.
-# if you want to query for a large number of objects, it will be faster to call ZTF individually
-# (code above) and use the internal parallelization. try 8-12 workers.
-```
-
-```{code-cell} ipython3
-parallel_starttime = time.time()
-
-# start a multiprocessing pool and run all the archive queries
-parallel_df_lc = MultiIndexDFObject()  # to collect the results
-callback = parallel_df_lc.append  # will be called once on the result returned by each archive
-with mp.Pool(processes=n_workers) as pool:
-
-    # start the processes that call the archives
-    pool.apply_async(gaia_get_lightcurves, args=(sample_table,), callback=callback)
-    pool.apply_async(heasarc_get_lightcurves, args=(sample_table,), callback=callback)
-    pool.apply_async(hcv_get_lightcurves, args=(sample_table,), callback=callback)
-    pool.apply_async(icecube_get_lightcurves, args=(sample_table,), callback=callback)
-    pool.apply_async(panstarrs_get_lightcurves, args=(sample_table,), callback=callback)
-    pool.apply_async(tess_kepler_get_lightcurves, args=(sample_table,), callback=callback)
-    pool.apply_async(wise_get_lightcurves, args=(sample_table,), callback=callback)
-    pool.apply_async(ztf_get_lightcurves, args=(sample_table,), kwds=ztf_kwargs, callback=callback)
-
-    pool.close()  # signal that no more jobs will be submitted to the pool
-    pool.join()  # wait for all jobs to complete, including the callback
-
-parallel_endtime = time.time()
-
-# LightKurve will return an "Error" when it doesn't find a match for a target
-# These are not real errors and can be safely ignored.
-```
-
-```{code-cell} ipython3
-# How long did parallel processing take?
-# and look at the results
-print('parallel processing took', parallel_endtime - parallel_starttime, 's')
-parallel_df_lc.data
-```
-
 ```{code-cell} ipython3
 # Save the data for future use with ML notebook
 #parquet_savename = 'output/df_lc_090723_yang.parquet'
-#parallel_df_lc.data.to_parquet(parquet_savename)
+#df_lc.data.to_parquet(parquet_savename)
 #print("file saved!")
 ```
 
 ```{code-cell} ipython3
 # Could load a previously saved file in order to plot
 #parquet_loadname = 'output/df_lc_090723_yang.parquet'
-#parallel_df_lc = MultiIndexDFObject()
-#parallel_df_lc.data = pd.read_parquet(parquet_loadname)
+#df_lc = MultiIndexDFObject()
+#df_lc.data = pd.read_parquet(parquet_loadname)
 #print("file loaded!")
 ```
 
-## 5. Make plots of luminosity as a function of time
+## 4. Make plots of luminosity as a function of time
 These plots are modelled after [van Velzen et al., 2021](https://arxiv.org/pdf/2111.09391.pdf). We show flux in mJy as a function of time for all available bands for each object. `show_nbr_figures` controls how many plots are actually generated and returned to the screen.  If you choose to save the plots with `save_output`, they will be put in the output directory and labelled by sample number.
 
-__Note__ that in the following, we can either plot the results from `df_lc` (from the serial call) or `parallel_df_lc` (from the parallel call). By default (see next cell) the output of the parallel call is used.
-
 ```{code-cell} ipython3
-_ = create_figures(df_lc = parallel_df_lc, # either df_lc (serial call) or parallel_df_lc (parallel call)
+_ = create_figures(df_lc = df_lc,
                    show_nbr_figures = 5,  # how many plots do you actually want to see?
                    save_output = True ,  # should the resulting plots be saved?
                   )
