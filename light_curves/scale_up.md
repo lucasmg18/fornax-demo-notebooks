@@ -1,4 +1,17 @@
 
+# Make Multi-Wavelength Light Curves for Large Samples
+
++++
+
+## Learning Goals
+
+By the end of this tutorial, you will be able to:
+  &bull; Parallelize the code demonstrated in the [light_curve_generator](light_curve_generator.md) notebook to get multi-wavelength light curves.
+  &bull; Launch a run using a large sample of objects, monitor the run's progress automatically, and understand its resource usage (CPU and RAM).
+  &bull; Understand some of general challenges and requirements when scaling up code.
+
++++
+
 ## Introduction
 
 +++
@@ -7,34 +20,22 @@ This notebook shows how to collect multi-wavelength light curves for a large sam
 This is a scaling-up of the [light_curve_generator](light_curve_generator.md) and assumes you are familiar with the content of that notebook.
 Many of the challenges, needs, and wants discussed in the appendix and addressed throughout the notebook are common when scaling up code and the ideas can be applied to other use cases.
 
-We have written a bash script and a python "helper" to facilitate the execution and monitoring of large-scale light curve collection.
+We have written a bash script and a python "helper" to facilitate large-scale light curve collection.
 They are demonstrated below.
 
 Notebook sections are:
-  &bull; "Overview" describes what the script and helper do and compares some multiprocessing options.
-  &bull; "Example 1" shows how to launch a large-scale run using the bash script, monitor the performance, and diagnose a problem (out of RAM).
-  &bull; "Example 2" shows how to parallelize the example from the light_curve_generator notebook using the helper and python's `multiprocessing`.
-  &bull; "Example 3" details the parameter options and how to use them in python and bash.
-  &bull; "Appendix" contains background information including a discussion of the challenges, needs, and wants encountered when scaling up and general advice for the user.
+  &bull; "Overview" describes what the script and helper do. Compares some parallel processing options.
+  &bull; "Example 1" shows how to launch a large-scale run using the bash script, monitor its progress automatically, and diagnose a problem (out of RAM).
+  &bull; "Example 2" shows how to parallelize the example from the light_curve_generator notebook using the helper and python's `multiprocessing` library.
+  &bull; "Example 3" details the helper parameter options and how to use them in python and bash.
+  &bull; "Appendix" contains background information including a discussion of the challenges, needs, and wants encountered when scaling up this code, and general advice for the user.
 
 **Many of the bash commands below are shown in non-executable cells because they are not intended to be run in this notebook.**
 Bash commands that are not executed below begin with the symbol `$ `, and those that are executed begin with `!`.
 Both types can be called from the command-line -- open a new terminal and copy/paste the cell text without the beginning symbol. The bash script is not intended to be executed from within a notebook and may behave strangely if attempted.
 Also be aware that the script path shown in the commands below assumes you are in the same directory as this notebook. Adjust it if needed.
 
-### Imports
-
-```{code-cell}
-import json
-import multiprocessing
-import pandas as pd
-import sys
-
-sys.path.append("code_src/")
-import helpers.scale_up
-from data_structures import MultiIndexDFObject
-from plot_functions import create_figures
-```
++++
 
 ## Overview
 
@@ -66,6 +67,21 @@ The bash script allows the user to launch the full run with a single command and
   &bull; Python's `multiprocessing` library. Useful as a demonstration. May be convenient for runs with small to medium sample sizes. Has drawbacks that may be significant including the inability to use ZTF's internal parallelization and that it does not save the log output (stdout and stderr) to file.
 
 +++
+
+### Imports
+
+```{code-cell}
+import json  # create json strings for bash script arguments
+import multiprocessing  # python parallelization method
+import pandas as pd  # use a DataFrame to work with light-curve and other data
+import sys  # add code directories to the path
+
+sys.path.append("code_src/")
+import helpers.scale_up  # python "helper" for parallelization and large scale runs
+import helpers.top  # load `top` output to DataFrames and make figures
+from data_structures import MultiIndexDFObject  # load light curve data as a MultiIndexDFObject
+from plot_functions import create_figures  # make light curve figures
+```
 
 ## Example 1: Multi-wavelength light curves for 500,000 SDSS AGN
 
@@ -210,8 +226,9 @@ Once saved to file, the helper can parse the `top` output into pandas DataFrames
 
 ```{code-cell}
 run_id = "demo-SDSS-500k"
+logs_dir = helpers.scale_up.run(build="logs_dir", run_id=run_id)
 
-toplog = helpers.scale_up.load_toplog(run_id)
+toplog = helpers.top.load_top_output(toptxt_dir=logs_dir)
 ```
 
 ```{code-cell}
@@ -261,7 +278,7 @@ We then tagged `top` timestamps with corresponding step names by appending the n
 The helper can recognize these tags and show them on a figure:
 
 ```{code-cell}
-ztf_toplog = helpers.scale_up.load_toplog(run_id, toptxt_filename="top.tag-ztf.txt")
+ztf_toplog = helpers.top.load_top_output(toptxt_file="top.tag-ztf.txt", toptxt_dir=logs_dir)
 
 fig = ztf_toplog.plot_time_tags(summary_y="used_GiB")
 # (This run starts by reading a previously cached parquet file containing the raw data returned by workers.)
@@ -309,16 +326,14 @@ archive_names = helpers.scale_up.ARCHIVE_NAMES["core"]  # predefined list ("core
 archive_names
 ```
 
-Collect the sample and write it as a .ecsv file:
+Collect the sample and write it as a .ecsv file.
+Then query the archives in parallel using a `multiprocessing.Pool` and write the light curve data as .parquet files.
 
 ```{code-cell}
+%%time
 sample_table = helpers.scale_up.run(build="sample", **kwargs_dict)
 # sample_table is returned if you want to look at it but it is not used below
-```
 
-Query the archives in parallel using a `multiprocessing.Pool`:
-
-```{code-cell}
 with multiprocessing.Pool(processes=len(archive_names)) as pool:
     # submit one job per archive
     for archive in archive_names:
