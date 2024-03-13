@@ -11,10 +11,7 @@ import yaml
 from astropy.table import Table
 
 HELPERS_DIR = Path(__file__).parent
-sys.path.append(str(HELPERS_DIR))  # put code_src dir on the path
 sys.path.append(str(HELPERS_DIR.parent))  # put code_src dir on the path
-
-import top
 
 # Lazy-load all other imports to avoid depending on modules that will not actually be used.
 
@@ -289,25 +286,6 @@ def write_kwargs_to_yaml(**kwargs_dict) -> None:
     with open(yaml_path, "w") as fout:
         yaml.safe_dump(kwargs_dict, fout)
     print(f"kwargs written to {yaml_path}")
-
-
-def load_toplog(run_id: str, toptxt_filename: str | None = None) -> top.TopLog:
-    """Parse top output from the run's logs/ directory and return summary and pid_stats DataFrames."""
-    logs_dir = run(build="logs_dir", run_id=run_id)
-
-    # map PIDs to names by scraping log files
-    pid_map = {}
-    for logfile in logs_dir.iterdir():
-        if not logfile.is_file() or logfile.name.endswith(".sh.log"):
-            continue
-        pid_map.update(top.regex_log_for_pid_map(logfile))
-
-    toptxt_filename = logs_dir / toptxt_filename if toptxt_filename else logs_dir / "top.txt"
-    toplog = top.TopLog.from_toptxt(toptxt_filename, pid_map=pid_map, run_id=run_id)
-    # top_summary, top_pid_stats = top.load_toptxt(logs_dir / "top.txt", pid_map=pid_map, run_id=run_id)
-
-    # return top_summary, top_pid_stats
-    return toplog
 
 
 # ---- helpers for __name__ == "__main__" ---- #
