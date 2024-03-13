@@ -1,5 +1,4 @@
 import re
-from collections import namedtuple
 from pathlib import Path
 
 import attrs
@@ -15,41 +14,48 @@ COLORS = tuple(
 )
 
 
-def regex_log_for_pid_map(logfile: Path) -> dict:
-    """Scrape the logfile for PIDs and their associated job names."""
-    pid_map = {}
-    pid_re = r"\[pid=([0-9]+)\]"
-    archive_re = r"archive=([a-zA-Z0-9_-]+)"
-    build_re = r"build=([a-zA-Z0-9_-]+)"
+def load_top_output(
+    toptxt_file: str | Path = "top.txt",
+    *,
+    run_id: str = str(),
+    pid_names: dict[int, str] = dict(),
+    scrape_logs_for_pid_names: bool = True,
+    toptxt_dir: Path | None = None,
+) -> "_TopLog":
+    """Parse `top` output from a text file and return it as a `_TopLog`.
 
-    with open(logfile) as fin:
-        for line in fin:
-            pid_match = re.search(pid_re, line)
-            if not pid_match:
-                continue
-            pid = pid_match.group(1)
+    Parameters
+    ----------
+    toptxt_file : str or Path
+        Name or path to the file containing `top` output. If `toptxt_dir` is not None, this should be
+        relative to it. Otherwise, this may be an absolute path or relative to the current working directory.
+    run_id : str (optional)
+        ID for this output. Used to label figures.
+    pid_names : dict[int, str] (optional)
+        Mapping of PID numbers to names.
+    scrape_logs_for_pid_names : bool
+        Whether to search through the files in `toptxt_dir` looking for PID names.
+    toptxt_dir: Path (optional)
+        Path to the directory containing `toptxt_file`. If None, this will be the parent of `toptxt_file`.
 
-            name_match = re.search(archive_re, line) or re.search(build_re, line)
-            try:
-                pid_map[pid] = name_match.group(1)
-            except AttributeError:
-                if "worker" not in line:
-                    raise NotImplementedError(f"unable to identify a name for [pid={pid}]")
-                pid_map[pid] = logfile.stem + "-worker"
-
-    return pid_map
-
-
-@attrs.define
-class _TimeTag:
-    name: str = attrs.field()
-    time: pd.Timestamp = attrs.field()
-    color: str | tuple[float, float, float] = attrs.field()
+    Returns
+    -------
+    TopLog
+        The `top` output loaded as a `TopLog`.
+    """
+    toplog = _TopLog._from_txt_file(
+        toptxt_file,
+        toptxt_dir=toptxt_dir,
+        run_id=run_id,
+        pid_names=pid_names,
+        scrape_logs_for_pid_names=scrape_logs_for_pid_names,
+    )
+    return toplog
 
 
-@attrs.define
-class TopLog:
-    file_path: Path = attrs.field()
+@attrs.define(kw_only=True)
+class _TopLog:
+    file_path: Path = attrs.field(converter=Path)
     run_id: str = attrs.field(factory=str)
     summary_df: pd.DataFrame | None = attrs.field(default=None)
     pids_df: pd.DataFrame | None = attrs.field(default=None)
@@ -59,17 +65,67 @@ class TopLog:
     pid_starts: dict = attrs.field(factory=dict)
     pid_ends: dict = attrs.field(factory=dict)
     job_colors: dict = attrs.field(factory=dict)
-    # tag_colors: dict = attrs.field(factory=dict)
-    time_tags: dict[str, _TimeTag] = attrs.field(factory=dict)
+    time_tags: dict[str, "_TimeTag"] = attrs.field(factory=dict)
     default_color: str = attrs.field(default="0.75")
 
-    @classmethod
-    def from_toptxt(cls, file_path: Path, *, pid_map: dict[int, str] = dict(), run_id: str = str()) -> "TopLog":
-        toplog = cls(file_path=file_path, run_id=run_id)
-        toplog._create_dfs(toplog._parse_toptxt(pid_map))
+    @staticmethod
+    def _scrape_logs_for_pid_names(logs_dir: Path | str) -> dict[int, str]:
+        """Map PIDs to their names by scraping files in logs_dir."""
+        pid_names = {}
+        for logfile in Path(logs_dir).iterdir():
+            if not logfile.is_file() or logfile.name.endswith(".sh.log"):
+                continue
+            pid_names.update(_TopLog._regex_log_for_pid_names(logfile))
+        return pid_names
 
-        toplog.pid_names = dict(zip(toplog.pids_df.PID, toplog.pids_df.pid_name))
-        toplog.pid_jobs = dict(zip(toplog.pids_df.PID, toplog.pids_df.job_name))
+    @staticmethod
+    def _regex_log_for_pid_names(logfile: Path) -> dict[int, str]:
+        """Scrape the logfile for PIDs and their associated job names."""
+        pid_names = {}
+        pid_re = r"\[pid=([0-9]+)\]"
+        archive_re = r"archive=([a-zA-Z0-9_-]+)"
+        build_re = r"build=([a-zA-Z0-9_-]+)"
+
+        with open(logfile) as fin:
+            for line in fin:
+                pid_match = re.search(pid_re, line)
+                if not pid_match:
+                    continue
+                pid = int(pid_match.group(1))
+
+                name_match = re.search(archive_re, line) or re.search(build_re, line)
+                try:
+                    pid_names[pid] = name_match.group(1)
+                except AttributeError:
+                    if "worker" not in line:
+                        raise NotImplementedError(f"unable to identify a name for [pid={pid}]")
+                    pid_names[pid] = logfile.stem + "-worker"
+
+        return pid_names
+
+    @classmethod
+    def _from_txt_file(
+        cls,
+        toptxt_file: str | Path = "top.txt",
+        *,
+        run_id: str = str(),
+        pid_names: dict[int, str] = dict(),
+        scrape_logs_for_pid_names: bool = True,
+        toptxt_dir: Path | None = None,
+    ) -> "_TopLog":
+        file_path = toptxt_dir / toptxt_file if toptxt_dir else toptxt_file
+        toplog = cls(file_path=file_path, run_id=run_id)
+
+        toplog.summary_df, toplog.pids_df = toplog._create_dfs(toplog._parse_toptxt())
+
+        # pid and job names
+        logs_pid_names = cls._scrape_logs_for_pid_names(toplog.file_path.parent) if scrape_logs_for_pid_names else {}
+        logs_pid_names.update(**pid_names)
+        logs_pid_names.update({pid: "" for pid in toplog.pids_df.PID.unique() if pid not in logs_pid_names})
+        toplog.pid_names = {pid: logs_pid_names[pid] for pid in sorted(logs_pid_names)}
+        toplog.pid_jobs = {pid: name.split("-")[0] for pid, name in toplog.pid_names.items()}
+        toplog.pids_df["pid_name"] = toplog.pids_df.PID.map(toplog.pid_names)
+        toplog.pids_df["job_name"] = toplog.pids_df.PID.map(toplog.pid_jobs)
 
         # pid_zorders
         pidgrps = toplog.pids_df.reset_index().groupby("PID")
@@ -83,26 +139,27 @@ class TopLog:
         toplog.job_colors = {job: next(colors) for job in toplog.pids_df.job_name.unique() if job != ""}
 
         toplog.time_tags = {}
-        if "tag" in toplog.summary_df.columns:
-            time_tags = toplog.summary_df.query("tag != ''").tag.items()
+        if "time_tag" in toplog.summary_df.columns:
+            time_tags = toplog.summary_df.query("time_tag != ''").time_tag.items()
             toplog.time_tags = {tag: _TimeTag(name=tag, time=time, color=next(colors)) for time, tag in time_tags}
-            del toplog.summary_df["tag"]
+            del toplog.summary_df["time_tag"]
 
         return toplog
 
-    def _parse_toptxt(self, pid_map: dict[int:str]):
+    def _parse_toptxt(self):
         line_batch, regexed_batches = [], []
         with open(self.file_path, "r") as fin:
-            for l, line in enumerate(fin):
+            for line in fin:
                 if line.startswith("----") and len(line_batch) > 0:
-                    regexed_batches.append(self._regex_line_batch(line_batch, pid_map))
+                    regexed_batches.append(self._regex_top_line_batch(line_batch))
                     line_batch = []
                 line_batch.append(line.removeprefix("----").rstrip("\n").strip())
-            regexed_batches.append(self._regex_line_batch(line_batch, pid_map))
+            regexed_batches.append(self._regex_top_line_batch(line_batch))
         return regexed_batches
 
     def _create_dfs(self, regexed_batches):
         summary_df, pids_df = [pd.DataFrame(dicts) for dicts in zip(*regexed_batches)]
+
         pids_df = pids_df.explode(pids_df.columns.to_list(), ignore_index=True)
 
         for df in [summary_df, pids_df]:
@@ -110,8 +167,8 @@ class TopLog:
             df.dropna(axis=0, how="all", inplace=True)
             df.dropna(axis=1, how="all", inplace=True)
 
-        if "tag" in summary_df.columns:
-            summary_df["tag"] = summary_df["tag"].fillna("")
+        if "time_tag" in summary_df.columns:
+            summary_df["time_tag"] = summary_df["time_tag"].fillna("")
 
         for c in ["VIRT", "RES", "SHR"]:
             units = pids_df[c].str[-1].unique()
@@ -124,10 +181,9 @@ class TopLog:
 
         summary_df = summary_df.sort_values("time").set_index("time")
         pids_df = pids_df.sort_values(["time", "PID"]).set_index("time")
+        return summary_df, pids_df
 
-        self.summary_df, self.pids_df = summary_df, pids_df
-
-    def _regex_line_batch(self, line_batch: list[str], pid_map: dict[int:str]) -> tuple[dict, dict]:
+    def _regex_top_line_batch(self, line_batch: list[str]) -> tuple[dict, dict]:
         """Parse a batch of lines representing one dump of top."""
         if len(line_batch) < 7:
             # print(f"Warning: Skipping incomplete line batch. {line_batch}")
@@ -158,32 +214,25 @@ class TopLog:
         columns = [*load_names, *mem_names, "time"]
         data = [*load_avg, mem_total, mem_free, mem_used, mem_avail, batch_time]
         if batch_tag:
-            columns, data = ["tag"] + columns, [batch_tag] + data
-        summary = dict(zip(columns, data))
+            columns, data = ["time_tag"] + columns, [batch_tag] + data
+        summary_dict = dict(zip(columns, data))
         if len(line_batch) < 10:
-            return summary, dict()
+            return summary_dict, dict()
 
         # pid df, lines 8+
-        pid_colnames = line_batch[8].split()
-        pids_df = list(zip(*[line.split() for line in line_batch[9:]]))
-        pids_tmp = dict(zip(pid_colnames, pids_df))
-        pid_names = tuple(pid_map.get(pid, str()) for pid in pids_tmp["PID"])
-        job_names = tuple(name.split("-")[0] for name in pid_names)
-        pids = {
-            "job_name": job_names,
-            "pid_name": pid_names,
-            **pids_tmp,
-            "time": tuple([batch_time] * len(pid_names)),
-        }
+        pids_colnames = line_batch[8].split()
+        pids_data = list(zip(*[line.split() for line in line_batch[9:]]))
+        pids_dict = dict(zip(pids_colnames, pids_data))
+        pids_dict["time"] = tuple([batch_time] * len(pids_data[0]))
 
-        return summary, pids
+        return summary_dict, pids_dict
 
     def plot_overview(self, *, between_time: tuple[str, str] | None = None) -> matplotlib.figure.Figure:
         """Create a summary figure visualizing top output."""
         assert self.summary_df.index.name == "time"  # relying on this index
 
         gridspec_kw = dict(top=0.92, right=0.8, hspace=0.08, height_ratios=[1, 2, 1, 2])
-        fig, axs = plt.subplots(4, sharex=True, gridspec_kw=gridspec_kw, figsize=(12,8))
+        fig, axs = plt.subplots(4, sharex=True, gridspec_kw=gridspec_kw, figsize=(12, 8))
         ycols_axs = dict(zip(["load_avg_1m", "%CPU", "avail_GiB", "%MEM"], axs))
 
         # plot
@@ -276,18 +325,25 @@ class TopLog:
 
     def plot_time_tags(self, summary_y: str = "used_GiB") -> matplotlib.figure.Figure:
         y_series = self.summary_df[summary_y]
-        fig, ax = plt.subplots(figsize=(8,6))
+        fig, ax = plt.subplots(figsize=(8, 6))
 
-        kwargs=dict(s=100, zorder=5)
+        kwargs = dict(s=100, zorder=5)
         for tag in self.time_tags.values():
             kwargs.update(color=tag.color, label=tag.name)
             ax.scatter(tag.time, y_series.loc[tag.time], **kwargs)
-        
+
         kwargs = dict(color=self.default_color, label=f"Total {summary_y}", markersize=4)
         ax.plot(self.summary_df.index, y_series, "-o", **kwargs)
-        
+
         xlabel = f"{self.summary_df.index.name} ({y_series.index[0].tzname()})"
         self._format_axes({summary_y: ax}, xlabel=xlabel, bbox_to_anchor=None)
         fig.suptitle(f"time_tags\n{self.run_id} ({y_series.index[0].date()})")
         plt.show(block=False)
         return fig
+
+
+@attrs.define(kw_only=True)
+class _TimeTag:
+    name: str = attrs.field()
+    time: pd.Timestamp = attrs.field()
+    color: str | tuple[float, float, float] = attrs.field()
